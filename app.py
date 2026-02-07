@@ -6,6 +6,7 @@ import sqlite3
 import PyPDF2
 import re
 import hashlib
+import os  # <--- THIS WAS MISSING
 from datetime import datetime
 
 st.set_page_config(page_title="AARIVA Enterprise", layout="wide", page_icon="🏛️")
@@ -17,7 +18,7 @@ def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
-    # 1. USERS TABLE (The 8 Roles) - Using Double Quotes to avoid conflict
+    # 1. USERS TABLE
     c.execute("""CREATE TABLE IF NOT EXISTS users (
         username TEXT PRIMARY KEY,
         password TEXT,
@@ -33,7 +34,7 @@ def init_db():
         lead_faculty TEXT
     )""")
     
-    # 3. ASSESSMENTS TABLE (Metadata)
+    # 3. ASSESSMENTS TABLE
     c.execute("""CREATE TABLE IF NOT EXISTS assessments (
         assessment_id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT,
@@ -41,7 +42,7 @@ def init_db():
         date_created TEXT
     )""")
     
-    # 4. P-LENS RESULTS TABLE (The Algorithm Data)
+    # 4. P-LENS RESULTS TABLE
     c.execute("""CREATE TABLE IF NOT EXISTS plens_results (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         assessment_id INTEGER,
@@ -151,7 +152,6 @@ def process_and_save(pdf_file, time_file, assessment_name, course_code):
         t = row['Total_Minutes']
         s = row['Score']
         
-        # P-LENS Logic
         category = "Stable"
         risk = "Low"
         if t < 20 and s < 18: 

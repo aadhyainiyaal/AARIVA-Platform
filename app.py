@@ -3,138 +3,142 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-st.set_page_config(page_title="AARIVA Pro", layout="wide", page_icon="🧠")
+st.set_page_config(page_title="AARIVA: ExamSoft Fusion", layout="wide", page_icon="🧬")
 
 # --- CSS ---
 st.markdown("""
     <style>
-    .header {font-size: 3rem; color: #004aad; text-align: center; font-weight: 700;}
+    .header {font-size: 2.5rem; color: #004aad; font-weight: 700;}
+    .metric-card {background-color: #f0f2f6; padding: 15px; border-radius: 10px; border-left: 5px solid #004aad;}
     </style>
 """, unsafe_allow_html=True)
 
-# --- SESSION STATE ---
-if 'authenticated' not in st.session_state: st.session_state.authenticated = False
-if 'role' not in st.session_state: st.session_state.role = None
-if 'cohort_data' not in st.session_state: st.session_state.cohort_data = None
+# --- 1. THE DATA CLEANER (Tailored for YOUR files) ---
+def clean_id(val):
+    # Standardize ID: " 2025MI01 " -> "2025mi01"
+    return str(val).strip().lower()
 
-# --- DATABASE ---
-USERS = {
-    "prof": {"pass": "admin123", "role": "Faculty", "name": "Dr. Sivapriya"},
-    "dean": {"pass": "dean2025", "role": "Dean", "name": "Dean"},
-    "student": {"pass": "learn2025", "role": "Student", "name": "Scholar"}
-}
-
-# --- SMART DATA CLEANER (The Fix) ---
-def clean_data(df):
-    # 1. Normalize Column Names (Strip spaces, lowercase)
-    df.columns = df.columns.str.strip().str.title() 
-    
-    # 2. Rename specific columns to match what Plotly expects
-    # Map common variations to standard names
-    rename_map = {
-        'Studentid': 'Student ID',
-        'Student_Id': 'Student ID',
-        'Id': 'Student ID',
-        'Duration': 'Time',
-        'Minutes': 'Time',
-        'Marks': 'Score',
-        'Grade': 'Score'
-    }
-    df.rename(columns=rename_map, inplace=True)
-    
-    # 3. Ensure required columns exist (Fill defaults if missing to prevent crash)
-    if 'Time' not in df.columns: df['Time'] = 45
-    if 'Score' not in df.columns: df['Score'] = 75
-    if 'Student ID' not in df.columns: df['Student ID'] = [f'ID_{i}' for i in range(len(df))]
-    
-    return df
-
-def process_files(file):
+def load_data(file_time, file_score, file_item):
+    # --- A. PROCESS VELOCITY (Elapsed Time File) ---
     try:
-        if file.name.endswith('.csv'):
-            df = pd.read_csv(file)
-        else:
-            df = pd.read_excel(file)
+        df_time = pd.read_excel(file_time)
+        # Auto-detect ID and Time columns common in ExamSoft
+        id_col_t = next((c for c in df_time.columns if 'id' in c.lower() or 'student' in c.lower()), None)
+        time_col = next((c for c in df_time.columns if 'elapsed' in c.lower() or 'duration' in c.lower() or 'time' in c.lower()), None)
         
-        # APPLY THE CLEANER
-        df = clean_data(df)
-
-        def categorize(row):
-            # Safe conversion to numbers
-            t = pd.to_numeric(row['Time'], errors='coerce')
-            s = pd.to_numeric(row['Score'], errors='coerce')
+        if not time_col: 
+            st.error("❌ Error: Could not find 'Elapsed Time' column in the first file.")
+            return None
             
-            if t < 20 and s < 60: return "Rapid Guesser"
-            if t > 60 and s < 60: return "Struggling Learner"
-            if t < 20 and s > 85: return "Mastery"
-            return "Stable"
-
-        df['Profile'] = df.apply(categorize, axis=1)
-        return df
+        # Clean Data
+        df_time['Clean_ID'] = df_time[id_col_t].apply(clean_id)
+        # Convert Excel time (sometimes fraction of day) to Minutes
+        # If it's a number like 0.02 (excel day fraction), * 1440. If it's 35 (minutes), keep it.
+        if df_time[time_col].mean() < 1: 
+            df_time['Minutes'] = df_time[time_col] * 1440 
+        else:
+            df_time['Minutes'] = df_time[time_col]
+            
+        df_time = df_time[['Clean_ID', 'Minutes']]
     except Exception as e:
-        st.error(f"Error reading file: {e}")
+        st.error(f"Error reading Time File: {e}")
         return None
 
-# --- VIEWS ---
-def login():
-    st.markdown("<div class='header'>AARIVA</div>", unsafe_allow_html=True)
-    c1, c2, c3 = st.columns([1,2,1])
-    with c2:
-        with st.form("Login"):
-            u = st.text_input("Username")
-            p = st.text_input("Password", type="password")
-            if st.form_submit_button("Login"):
-                if u in USERS and USERS[u]['pass'] == p:
-                    st.session_state.authenticated = True
-                    st.session_state.role = USERS[u]['role']
-                    st.session_state.user = USERS[u]['name']
-                    st.rerun()
-                else:
-                    st.error("Invalid")
+    # --- B. PROCESS COMPETENCY (MultipleETs/Score File) ---
+    try:
+        df_score = pd.read_excel(file_score) # or csv
+        id_col_s = next((c for c in df_score.columns if 'id' in c.lower() or 'student' in c.lower()), None)
+        score_col = next((c for c in df_score.columns if 'score' in c.lower() or 'mark' in c.lower() or 'percent' in c.lower()), None)
+        
+        if not score_col:
+            st.error("❌ Error: Could not find 'Score' column in the second file.")
+            return None
+            
+        df_score['Clean_ID'] = df_score[id_col_s].apply(clean_id)
+        df_score.rename(columns={score_col: 'Score'}, inplace=True)
+        df_score = df_score[['Clean_ID', 'Score']]
+    except Exception as e:
+        st.error(f"Error reading Score File: {e}")
+        return None
 
-def faculty_view():
-    st.title("Faculty Dashboard")
+    # --- C. MERGE THEM (The "Smoking Gun" Analysis) ---
+    merged = pd.merge(df_score, df_time, on='Clean_ID', how='inner')
     
-    with st.expander("📂 Upload Data", expanded=True):
-        up_file = st.file_uploader("Upload CSV/Excel", type=['csv','xlsx'])
-        if up_file:
-            df = process_files(up_file)
-            if df is not None:
-                st.session_state.cohort_data = df
-                st.success("Data Ingested!")
+    # --- D. APPLY P-LENS LOGIC ---
+    def diagnose(row):
+        t = row['Minutes']
+        s = row['Score']
+        # THRESHOLDS (Adjustable)
+        if t < 20 and s < 60: return "Rapid Guesser (High Risk)"
+        if t > 50 and s < 60: return "Struggling Learner (Knowledge Gap)"
+        if t < 20 and s > 85: return "Mastery (High Efficiency)"
+        return "Stable / Consistent"
 
-    if st.session_state.cohort_data is not None:
-        df = st.session_state.cohort_data
-        
-        # Safe Metrics
-        rapid = len(df[df['Profile'] == "Rapid Guesser"])
-        st.metric("Rapid Guessers", rapid)
-        
-        # PLOTLY CHART (Now Safe)
-        try:
-            fig = px.scatter(
-                df, 
-                x="Time", 
-                y="Score", 
-                color="Profile", 
-                hover_data=["Student ID"], 
-                title="Velocity Analysis",
-                color_discrete_map={"Rapid Guesser":"red", "Stable":"blue", "Struggling Learner":"orange", "Mastery":"green"}
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        except Exception as e:
-            st.warning(f"Could not render chart: {e}")
-        
-        st.dataframe(df)
+    merged['Profile'] = merged.apply(diagnose, axis=1)
+    return merged
 
-# --- ROUTER ---
-if not st.session_state.authenticated:
-    login()
-else:
-    with st.sidebar:
-        if st.button("Logout"):
-            st.session_state.authenticated = False
-            st.rerun()
-    if st.session_state.role == 'Faculty': faculty_view()
-    elif st.session_state.role == 'Dean': st.title("Dean View")
-    elif st.session_state.role == 'Student': st.title("Student View")
+# --- 2. THE UI ---
+def main():
+    st.markdown("<div class='header'>AARIVA: ExamSoft Analyzer</div>", unsafe_allow_html=True)
+    st.info("Upload your 3 ExamSoft Export files below to run the P-LENS Diagnosis.")
+
+    c1, c2, c3 = st.columns(3)
+    
+    # UPLOADER 1: TIME
+    with c1:
+        st.markdown("**1. Velocity Data**")
+        st.caption("Upload: `Mid-ElapsedTime...xlsx`")
+        f_time = st.file_uploader("Drop Time File", type=['xlsx', 'csv'], key="t")
+
+    # UPLOADER 2: SCORES
+    with c2:
+        st.markdown("**2. Competency Data**")
+        st.caption("Upload: `Mid-MultipleETs...`")
+        f_score = st.file_uploader("Drop Score File", type=['xlsx', 'csv'], key="s")
+
+    # UPLOADER 3: ITEM ANALYSIS (Future Use)
+    with c3:
+        st.markdown("**3. Item Difficulty**")
+        st.caption("Upload: `Item-Analysis...`")
+        f_item = st.file_uploader("Drop Analysis File", type=['pdf', 'xlsx'], key="i")
+
+    # --- RUN LOGIC ---
+    if f_time and f_score:
+        if st.button("🚀 Run AARIVA Fusion Engine"):
+            with st.spinner("Triangulating Data Sources..."):
+                df = load_data(f_time, f_score, f_item)
+                
+                if df is not None:
+                    # --- RESULTS DASHBOARD ---
+                    st.success(f"✅ Analysis Complete! Merged {len(df)} Student Records.")
+                    
+                    # 1. Metrics
+                    rapid = len(df[df['Profile'].str.contains("Rapid")])
+                    struggle = len(df[df['Profile'].str.contains("Struggling")])
+                    
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("Rapid Guessers (Burnout Risk)", rapid, delta="Urgent")
+                    m2.metric("Struggling Learners", struggle, delta="Needs Support")
+                    m3.metric("Avg Cohort Velocity", f"{int(df['Minutes'].mean())} min")
+                    
+                    # 2. The P-LENS Graph (Smoking Gun)
+                    fig = px.scatter(df, x="Minutes", y="Score", color="Profile", hover_data=["Clean_ID"],
+                                     title="The P-LENS Matrix: Velocity vs. Outcome",
+                                     color_discrete_map={
+                                         "Rapid Guesser (High Risk)": "red",
+                                         "Struggling Learner (Knowledge Gap)": "orange",
+                                         "Stable / Consistent": "blue",
+                                         "Mastery (High Efficiency)": "green"
+                                     })
+                    # Add Thesis Threshold Lines
+                    fig.add_vline(x=20, line_dash="dash", line_color="red", annotation_text="Rapid Guess Limit")
+                    fig.add_hline(y=60, line_dash="dash", line_color="grey", annotation_text="Pass Mark")
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # 3. Data Table
+                    with st.expander("📄 View Detailed Student Report"):
+                        st.dataframe(df)
+
+if __name__ == "__main__":
+    main()

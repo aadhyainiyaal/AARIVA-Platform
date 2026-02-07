@@ -2,5 +2,5 @@ streamlit
 pandas
 numpy
 plotly
-pypdf2
+PyPDF2
 openpyxl

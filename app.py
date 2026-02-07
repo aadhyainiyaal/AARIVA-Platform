@@ -2,6 +2,7 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
+import re
 
 st.set_page_config(page_title="AARIVA: ExamSoft Fusion", layout="wide", page_icon="🧬")
 
@@ -9,136 +10,137 @@ st.set_page_config(page_title="AARIVA: ExamSoft Fusion", layout="wide", page_ico
 st.markdown("""
     <style>
     .header {font-size: 2.5rem; color: #004aad; font-weight: 700;}
-    .metric-card {background-color: #f0f2f6; padding: 15px; border-radius: 10px; border-left: 5px solid #004aad;}
     </style>
 """, unsafe_allow_html=True)
 
-# --- 1. THE DATA CLEANER (Tailored for YOUR files) ---
+# --- 1. THE SMART PARSER (The Fix) ---
+def parse_time(val):
+    # Converts '10:44' (str) -> 10.73 (float minutes)
+    # Converts 15 (int) -> 15.0 (float)
+    if pd.isna(val): return 0
+    val = str(val).strip()
+    
+    # CASE 1: MM:SS format (e.g., "10:44")
+    if ':' in val:
+        try:
+            parts = val.split(':')
+            minutes = int(parts[0])
+            seconds = int(parts[1])
+            return minutes + (seconds / 60)
+        except:
+            return 0
+            
+    # CASE 2: Already a number (e.g., "45" or 45)
+    try:
+        return float(val)
+    except:
+        return 0
+
 def clean_id(val):
-    # Standardize ID: " 2025MI01 " -> "2025mi01"
     return str(val).strip().lower()
 
-def load_data(file_time, file_score, file_item):
-    # --- A. PROCESS VELOCITY (Elapsed Time File) ---
+# --- 2. DATA LOADER ---
+def load_data(file_time, file_score):
+    # --- A. PROCESS VELOCITY (Elapsed Time) ---
     try:
-        df_time = pd.read_excel(file_time)
-        # Auto-detect ID and Time columns common in ExamSoft
-        id_col_t = next((c for c in df_time.columns if 'id' in c.lower() or 'student' in c.lower()), None)
-        time_col = next((c for c in df_time.columns if 'elapsed' in c.lower() or 'duration' in c.lower() or 'time' in c.lower()), None)
-        
-        if not time_col: 
-            st.error("❌ Error: Could not find 'Elapsed Time' column in the first file.")
-            return None
-            
-        # Clean Data
-        df_time['Clean_ID'] = df_time[id_col_t].apply(clean_id)
-        # Convert Excel time (sometimes fraction of day) to Minutes
-        # If it's a number like 0.02 (excel day fraction), * 1440. If it's 35 (minutes), keep it.
-        if df_time[time_col].mean() < 1: 
-            df_time['Minutes'] = df_time[time_col] * 1440 
+        # Read file
+        if file_time.name.endswith('.csv'):
+            df_time = pd.read_csv(file_time)
         else:
-            df_time['Minutes'] = df_time[time_col]
-            
+            df_time = pd.read_excel(file_time)
+
+        # Find Columns
+        id_col_t = next((c for c in df_time.columns if 'id' in c.lower() or 'student' in c.lower()), None)
+        # Look for "Elapsed" or "Time" or "Duration"
+        time_col = next((c for c in df_time.columns if 'elapsed' in c.lower() or 'time' in c.lower()), None)
+        
+        if not time_col:
+            st.error("❌ Error: Could not find 'Elapsed Time' column.")
+            return None
+
+        # Clean ID
+        df_time['Clean_ID'] = df_time[id_col_t].apply(clean_id)
+        
+        # APPLY THE FIX: Use the smart parser on the time column
+        df_time['Minutes'] = df_time[time_col].apply(parse_time)
+        
         df_time = df_time[['Clean_ID', 'Minutes']]
+        
     except Exception as e:
         st.error(f"Error reading Time File: {e}")
         return None
 
-    # --- B. PROCESS COMPETENCY (MultipleETs/Score File) ---
+    # --- B. PROCESS COMPETENCY (Scores) ---
     try:
-        df_score = pd.read_excel(file_score) # or csv
+        if file_score.name.endswith('.csv'):
+            df_score = pd.read_csv(file_score)
+        else:
+            df_score = pd.read_excel(file_score)
+
         id_col_s = next((c for c in df_score.columns if 'id' in c.lower() or 'student' in c.lower()), None)
         score_col = next((c for c in df_score.columns if 'score' in c.lower() or 'mark' in c.lower() or 'percent' in c.lower()), None)
         
         if not score_col:
-            st.error("❌ Error: Could not find 'Score' column in the second file.")
+            st.error("❌ Error: Could not find 'Score' column.")
             return None
             
         df_score['Clean_ID'] = df_score[id_col_s].apply(clean_id)
         df_score.rename(columns={score_col: 'Score'}, inplace=True)
+        
+        # Force Score to be numeric
+        df_score['Score'] = pd.to_numeric(df_score['Score'], errors='coerce').fillna(0)
+        
         df_score = df_score[['Clean_ID', 'Score']]
     except Exception as e:
         st.error(f"Error reading Score File: {e}")
         return None
 
-    # --- C. MERGE THEM (The "Smoking Gun" Analysis) ---
+    # --- C. MERGE & DIAGNOSE ---
     merged = pd.merge(df_score, df_time, on='Clean_ID', how='inner')
     
-    # --- D. APPLY P-LENS LOGIC ---
     def diagnose(row):
         t = row['Minutes']
         s = row['Score']
-        # THRESHOLDS (Adjustable)
-        if t < 20 and s < 60: return "Rapid Guesser (High Risk)"
-        if t > 50 and s < 60: return "Struggling Learner (Knowledge Gap)"
-        if t < 20 and s > 85: return "Mastery (High Efficiency)"
-        return "Stable / Consistent"
+        # THRESHOLDS
+        if t < 15 and s < 60: return "Rapid Guesser (Disengaged)"
+        if t > 50 and s < 60: return "Struggling Learner"
+        if t < 15 and s > 85: return "Mastery (High Velocity)"
+        return "Stable"
 
     merged['Profile'] = merged.apply(diagnose, axis=1)
     return merged
 
-# --- 2. THE UI ---
+# --- 3. UI ---
 def main():
     st.markdown("<div class='header'>AARIVA: ExamSoft Analyzer</div>", unsafe_allow_html=True)
-    st.info("Upload your 3 ExamSoft Export files below to run the P-LENS Diagnosis.")
-
-    c1, c2, c3 = st.columns(3)
     
-    # UPLOADER 1: TIME
+    c1, c2 = st.columns(2)
     with c1:
-        st.markdown("**1. Velocity Data**")
-        st.caption("Upload: `Mid-ElapsedTime...xlsx`")
-        f_time = st.file_uploader("Drop Time File", type=['xlsx', 'csv'], key="t")
-
-    # UPLOADER 2: SCORES
+        st.info("1. Upload Time File (xlsx/csv)")
+        f_time = st.file_uploader("Mid-ElapsedTime...", type=['xlsx', 'csv'], key="t")
     with c2:
-        st.markdown("**2. Competency Data**")
-        st.caption("Upload: `Mid-MultipleETs...`")
-        f_score = st.file_uploader("Drop Score File", type=['xlsx', 'csv'], key="s")
+        st.info("2. Upload Score File (xlsx/csv)")
+        f_score = st.file_uploader("Mid-MultipleETs...", type=['xlsx', 'csv'], key="s")
 
-    # UPLOADER 3: ITEM ANALYSIS (Future Use)
-    with c3:
-        st.markdown("**3. Item Difficulty**")
-        st.caption("Upload: `Item-Analysis...`")
-        f_item = st.file_uploader("Drop Analysis File", type=['pdf', 'xlsx'], key="i")
-
-    # --- RUN LOGIC ---
     if f_time and f_score:
-        if st.button("🚀 Run AARIVA Fusion Engine"):
-            with st.spinner("Triangulating Data Sources..."):
-                df = load_data(f_time, f_score, f_item)
+        if st.button("🚀 Run Analysis"):
+            with st.spinner("Parsing timestamps..."):
+                df = load_data(f_time, f_score)
                 
                 if df is not None:
-                    # --- RESULTS DASHBOARD ---
-                    st.success(f"✅ Analysis Complete! Merged {len(df)} Student Records.")
+                    st.success(f"✅ Success! Analyzed {len(df)} students.")
                     
-                    # 1. Metrics
+                    # Metrics
                     rapid = len(df[df['Profile'].str.contains("Rapid")])
-                    struggle = len(df[df['Profile'].str.contains("Struggling")])
+                    st.metric("Rapid Guessers found", rapid, delta="Urgent")
                     
-                    m1, m2, m3 = st.columns(3)
-                    m1.metric("Rapid Guessers (Burnout Risk)", rapid, delta="Urgent")
-                    m2.metric("Struggling Learners", struggle, delta="Needs Support")
-                    m3.metric("Avg Cohort Velocity", f"{int(df['Minutes'].mean())} min")
-                    
-                    # 2. The P-LENS Graph (Smoking Gun)
-                    fig = px.scatter(df, x="Minutes", y="Score", color="Profile", hover_data=["Clean_ID"],
-                                     title="The P-LENS Matrix: Velocity vs. Outcome",
-                                     color_discrete_map={
-                                         "Rapid Guesser (High Risk)": "red",
-                                         "Struggling Learner (Knowledge Gap)": "orange",
-                                         "Stable / Consistent": "blue",
-                                         "Mastery (High Efficiency)": "green"
-                                     })
-                    # Add Thesis Threshold Lines
-                    fig.add_vline(x=20, line_dash="dash", line_color="red", annotation_text="Rapid Guess Limit")
-                    fig.add_hline(y=60, line_dash="dash", line_color="grey", annotation_text="Pass Mark")
-                    
+                    # Chart
+                    fig = px.scatter(df, x="Minutes", y="Score", color="Profile", 
+                                     title="Velocity Matrix",
+                                     color_discrete_map={"Rapid Guesser (Disengaged)": "red", "Stable": "blue"})
                     st.plotly_chart(fig, use_container_width=True)
                     
-                    # 3. Data Table
-                    with st.expander("📄 View Detailed Student Report"):
-                        st.dataframe(df)
+                    st.dataframe(df)
 
 if __name__ == "__main__":
     main()
